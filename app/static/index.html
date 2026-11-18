@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rig Prestart</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="logo">Rig<span>Prestart</span></div>
+  <nav>
+    <a href="/" class="active">Crew prestart</a>
+    <a href="/manager">Manager</a>
+  </nav>
+</header>
+
+<main>
+  <section id="form-view">
+    <h1>Drill rig prestart</h1>
+    <p class="sub">Complete before the rig starts each shift. Any failed item is sent to maintenance automatically.</p>
+
+    <div id="error" class="error"></div>
+
+    <div class="card">
+      <h2>Rig &amp; shift</h2>
+      <div class="grid">
+        <div class="full">
+          <label for="rig">Rig</label>
+          <select id="rig"></select>
+        </div>
+        <div>
+          <label for="operator">Operator name</label>
+          <input id="operator" autocomplete="name" placeholder="e.g. Sam Taylor">
+        </div>
+        <div>
+          <label for="shift">Shift</label>
+          <select id="shift">
+            <option value="day">Day</option>
+            <option value="night">Night</option>
+          </select>
+        </div>
+        <div class="full">
+          <label for="hours">Hour meter reading</label>
+          <input id="hours" type="number" inputmode="decimal" step="0.1" min="0" placeholder="e.g. 12450.5">
+          <div class="hint" id="hours-hint"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Checklist</h2>
+      <div id="checklist"></div>
+    </div>
+
+    <div class="card">
+      <label for="notes">Other notes (optional)</label>
+      <textarea id="notes" rows="2"></textarea>
+    </div>
+
+    <button class="btn" id="submit">Submit prestart</button>
+  </section>
+
+  <section id="result-view" style="display:none">
+    <div class="card result" id="result"></div>
+    <button class="btn ghost" onclick="location.reload()">Start another prestart</button>
+  </section>
+</main>
+
+<script>
+const answers = {};      // item key -> "pass" | "fail" | "na"
+let checklist = [];
+let rigs = [];
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+async function load() {
+  [checklist, rigs] = await Promise.all([
+    fetch("/api/checklist").then(r => r.json()),
+    fetch("/api/rigs").then(r => r.json()),
+  ]);
+
+  $("rig").innerHTML = '<option value="">Select a rig…</option>' +
+    rigs.map(r => `<option value="${r.id}">${esc(r.name)} — ${esc(r.type)} (${esc(r.site)})</option>`).join("");
+
+  $("checklist").innerHTML = checklist.map(item => `
+    <div class="item" data-key="${item.key}">
+      <div class="item-head">
+        <div class="item-label">${esc(item.label)}</div>
+        <span class="sev ${item.severity}">${item.severity}</span>
+      </div>
+      <div class="toggle">
+        <button type="button" class="pass" data-v="pass">Pass</button>
+        <button type="button" class="fail" data-v="fail">Fail</button>
+        <button type="button" class="na" data-v="na">N/A</button>
+      </div>
+      <div class="defect"><input placeholder="Describe the defect (required)"></div>
+    </div>`).join("");
+
+  document.querySelectorAll(".item").forEach(row => {
+    row.querySelectorAll(".toggle button").forEach(btn => {
+      btn.addEventListener("click", () => {
+        answers[row.dataset.key] = btn.dataset.v;
+        row.querySelectorAll(".toggle button").forEach(b => b.classList.toggle("on", b === btn));
+        row.querySelector(".defect").classList.toggle("show", btn.dataset.v === "fail");
+      });
+    });
+  });
+}
+
+$("rig").addEventListener("change", () => {
+  const rig = rigs.find(r => r.id == $("rig").value);
+  $("hours-hint").textContent = rig && rig.last_hour_meter != null
+    ? `Last recorded reading: ${rig.last_hour_meter}` : "";
+});
+
+function showError(msg) {
+  $("error").textContent = msg;
+  $("error").classList.add("show");
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+$("submit").addEventListener("click", async () => {
+  $("error").classList.remove("show");
+
+  // Quick checks in the browser; the server checks everything again.
+  if (!$("rig").value) return showError("Select a rig.");
+  if ($("operator").value.trim().length < 2) return showError("Enter your name.");
+  if ($("hours").value === "") return showError("Enter the hour meter reading.");
+  const unanswered = checklist.filter(i => !answers[i.key]);
+  if (unanswered.length) return showError(`Answer every item. Missing: ${unanswered.map(i => i.label).join("; ")}`);
+
+  const items = checklist.map(i => ({
+    key: i.key,
+    result: answers[i.key],
+    comment: document.querySelector(`.item[data-key="${i.key}"] .defect input`).value.trim() || null,
+  }));
+  const missingDefect = items.find(i => i.result === "fail" && !i.comment);
+  if (missingDefect) return showError("Describe the defect for every failed item.");
+
+  $("submit").disabled = true;
+  const res = await fetch("/api/prestarts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      rig_id: Number($("rig").value),
+      operator: $("operator").value.trim(),
+      shift: $("shift").value,
+      hour_meter: Number($("hours").value),
+      items,
+      notes: $("notes").value.trim() || null,
+    }),
+  });
+  $("submit").disabled = false;
+  const data = await res.json();
+
+  if (!res.ok) {
+    const msg = Array.isArray(data.detail)
+      ? data.detail.map(d => d.msg.replace("Value error, ", "")).join(" ")
+      : data.detail;
+    return showError(msg || "Something went wrong.");
+  }
+  showResult(data);
+});
+
+function showResult(data) {
+  const text = {
+    go: ["Good to go", "All items passed. Have a safe shift."],
+    go_with_defects: ["Go, with defects logged", "Rig can operate. Maintenance has been notified."],
+    do_not_operate: ["Do not operate", "A critical item failed. Tag out the rig and contact your supervisor."],
+  }[data.outcome];
+  const list = data.actions_created.length
+    ? `<ul>${data.actions_created.map(a => `<li><b>${esc(a.severity)}</b>: ${esc(a.item)}</li>`).join("")}</ul>` : "";
+  $("result").className = `card result ${data.outcome}`;
+  $("result").innerHTML = `<div class="sub">${esc(data.rig)} — prestart #${data.id}</div>
+    <div class="big">${text[0]}</div><div>${text[1]}</div>${list}`;
+  $("form-view").style.display = "none";
+  $("result-view").style.display = "block";
+  window.scrollTo({ top: 0 });
+}
+
+load();
+</script>
+</body>
+</html>

@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rig Prestart — Manager</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="logo">Rig<span>Prestart</span></div>
+  <nav>
+    <a href="/">Crew prestart</a>
+    <a href="/manager" class="active">Manager</a>
+  </nav>
+</header>
+
+<main class="wide">
+  <div class="row-actions">
+    <div>
+      <h1>Fleet today</h1>
+      <p class="sub" id="date"></p>
+    </div>
+    <a class="btn small ghost" href="/api/export/prestarts.csv">Export prestarts (CSV)</a>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="n" id="s-compliance">–</div><div class="l">Prestarts done</div></div>
+    <div class="stat stop"><div class="n" id="s-critical">–</div><div class="l">Open critical</div></div>
+    <div class="stat warn"><div class="n" id="s-high">–</div><div class="l">Open high</div></div>
+    <div class="stat"><div class="n" id="s-low">–</div><div class="l">Open low</div></div>
+  </div>
+
+  <div class="card">
+    <h2>Rig status</h2>
+    <div class="fleet" id="fleet"></div>
+  </div>
+
+  <div class="card">
+    <h2>Open maintenance actions</h2>
+    <div id="actions"></div>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const LABEL = {
+  go: "Go", go_with_defects: "Go – defects logged",
+  do_not_operate: "Do not operate", not_started: "No prestart yet",
+};
+const time = (iso) => iso ? new Date(iso).toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : "";
+
+async function refresh() {
+  const [dash, actions] = await Promise.all([
+    fetch("/api/dashboard").then(r => r.json()),
+    fetch("/api/actions?status=open").then(r => r.json()),
+  ]);
+
+  $("date").textContent = `${new Date(dash.date).toLocaleDateString("en-AU", { weekday: "long", day: "numeric", month: "long" })} · Perth time · refreshes every 30s`;
+  $("s-compliance").textContent = `${dash.prestarts_done}/${dash.rigs_total}`;
+  $("s-critical").textContent = dash.open_actions.critical;
+  $("s-high").textContent = dash.open_actions.high;
+  $("s-low").textContent = dash.open_actions.low;
+
+  $("fleet").innerHTML = dash.fleet.map(r => {
+    const p = r.last_prestart;
+    return `<div class="rig ${r.status}">
+      <div class="name">${esc(r.rig)}</div>
+      <div class="meta">${esc(r.type)} · ${esc(r.site)}</div>
+      <span class="pill ${r.status}">${LABEL[r.status]}</span>
+      <div class="meta" style="margin-top:8px">
+        ${p ? `${esc(p.operator)} · ${esc(p.shift)} shift · ${time(p.submitted_at)}<br>Hours: ${p.hour_meter}` : "&nbsp;"}
+        ${r.open_actions ? `<br>${r.open_actions} open action${r.open_actions > 1 ? "s" : ""}` : ""}
+      </div>
+    </div>`;
+  }).join("");
+
+  $("actions").innerHTML = actions.length ? `
+    <table>
+      <thead><tr><th>Severity</th><th>Rig</th><th>Defect</th><th>Raised</th><th></th></tr></thead>
+      <tbody>${actions.map(a => `
+        <tr>
+          <td><span class="sev ${a.severity}">${a.severity}</span></td>
+          <td><b>${esc(a.rig_name)}</b></td>
+          <td>${esc(a.description)}</td>
+          <td>${time(a.created_at)}</td>
+          <td><button class="btn small" onclick="closeAction(${a.id})">Close</button></td>
+        </tr>`).join("")}
+      </tbody>
+    </table>` : `<div class="empty">No open actions. 👍</div>`;
+}
+
+async function closeAction(id) {
+  const who = prompt("Closed by (your name):");
+  if (!who) return;
+  const note = prompt("What was done? (optional)") || null;
+  const res = await fetch(`/api/actions/${id}/close`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ closed_by: who, note }),
+  });
+  if (!res.ok) alert((await res.json()).detail || "Could not close action");
+  refresh();
+}
+
+refresh();
+setInterval(refresh, 30000);
+</script>
+</body>
+</html>
